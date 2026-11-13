@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" fill="none">
+<defs>
+<pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="#fff" stroke-opacity=".06"/></pattern>
+<radialGradient id="s" cx="68%" cy="40%" r="60%"><stop stop-color="#fff" stop-opacity=".14"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="800" height="400" fill="#171717"/>
+<rect width="800" height="400" fill="url(#g)"/>
+<rect width="800" height="400" fill="url(#s)"/>
+<g stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+<circle cx="400" cy="200" r="90" stroke-opacity=".2" stroke-dasharray="4 8"/>
+<circle cx="400" cy="200" r="64" stroke-opacity=".5"/>
+<rect x="355" y="155" width="90" height="90" transform="rotate(45 400 200)" fill="#0a0a0a" stroke-width="2"/>
+<circle cx="400" cy="200" r="34" stroke-opacity=".5"/>
+<circle cx="400" cy="200" r="12" fill="#fff" stroke="none"/>
+<g stroke-opacity=".5"><path d="M498 200H515M485 249L500 258M449 285L458 300M400 298V315M351 285L342 300M315 249L300 258M302 200H285M315 151L300 142M351 115L342 100M400 102V85M449 115L458 100M485 151L500 142"/></g>
+<path d="M170 90Q240 120 310 90M490 90Q560 120 630 90" stroke-opacity=".5"/>
+<g stroke-width="1.5">
+<path d="M179 97L201 97L190 123Z" fill="#fff" stroke="none"/><path d="M214 104L236 104L225 130Z" fill="#262626"/><path d="M249 104L271 104L260 130Z" fill="#8f8f8f" stroke="none"/><path d="M284 96L306 96L295 122Z" fill="#171717"/>
+<path d="M499 97L521 97L510 123Z" fill="#171717"/><path d="M534 104L556 104L545 130Z" fill="#8f8f8f" stroke="none"/><path d="M569 104L591 104L580 130Z" fill="#262626"/><path d="M604 96L626 96L615 122Z" fill="#fff" stroke="none"/>
+</g>
+<g stroke-opacity=".4"><path d="M170 300H190M180 290V310M610 300H630M620 290V310"/></g>
+<circle cx="640" cy="200" r="7" fill="#fff" stroke="none"/>
+<circle cx="640" cy="200" r="14" stroke-opacity=".35"/>
+<g fill="#fff" stroke="none"><rect x="164" y="194" width="10" height="10" fill-opacity=".25" transform="rotate(45 169 199)"/><circle cx="230" cy="290" r="4" fill-opacity=".35"/><circle cx="570" cy="300" r="4" fill-opacity=".35"/></g>
+</g>
+</svg>

@@ -1,0 +1,32 @@
+Options -Indexes -ExecCGI -MultiViews
+DirectoryIndex index.php
+AcceptPathInfo Off
+
+<IfModule mod_authz_core.c>
+    Require all granted
+    <FilesMatch "^\.">
+        Require all denied
+    </FilesMatch>
+    <FilesMatch "(?i)\.(phtml|pht|phar)$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Allow from all
+    <FilesMatch "^\.">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+    <FilesMatch "(?i)\.(phtml|pht|phar)$">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+RewriteEngine On
+RewriteRule ^(?:uploads|private-storage|_festora-private|_festora-state)(?:/|$) - [F,L,NC]
+RewriteRule ^(?:index|events|event|login|signup|logout|register|my-registrations)\.php$ - [END]
+RewriteRule ^admin/(?:announcements|event_delete|event_form|index|participants|schedule)\.php$ - [END]
+RewriteRule ^api/events\.php$ - [END]
+RewriteRule \.(?:php[0-9]*|phtml|pht|phar)(?:/|$) - [F,END,NC]

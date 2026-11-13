@@ -1,0 +1,54 @@
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# Local secrets and machine-specific config (never commit)
+config.local.php
+config.*.local.php
+config.*.php
+!config.local.example.php
+*.pem
+*.p12
+*.key
+*.pfx
+*.p8
+*.jks
+*.keystore
+*.secret
+*.credentials
+credentials.json
+service-account*.json
+secrets/
+private/
+
+# Uploads, archives and backups
+uploads/
+private-storage/
+backups/
+*.zip
+*.bak
+*.sql.bak
+*.dump.sql
+*.sql
+!database/migrations/*.sql
+*.sql.gz
+*.sql.zst
+*.dump
+*.dump.*
+*.sqlite
+*.sqlite3
+*.db
+/database/festora.sql
+
+# Obsolete InfinityFree deployment artifacts; Render is the current target
+/deployment/infinityfree-upload/
+/docs/infinityfree-deployment.md
+
+# Dependencies
+node_modules/
+
+/config.local.example.php

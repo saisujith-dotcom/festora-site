@@ -1,0 +1,8 @@
+CREATE TABLE announcements (
+    id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    event_id   INT UNSIGNED NULL,
+    title      VARCHAR(150) NOT NULL,
+    message    TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_ann_event FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+) ENGINE=InnoDB;

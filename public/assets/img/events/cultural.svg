@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" fill="none">
+<defs>
+<pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" stroke="#fff" stroke-opacity=".06"/></pattern>
+<radialGradient id="s" cx="68%" cy="40%" r="60%"><stop stop-color="#fff" stop-opacity=".14"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="800" height="400" fill="#171717"/>
+<rect width="800" height="400" fill="url(#g)"/>
+<rect width="800" height="400" fill="url(#s)"/>
+<g stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+<g stroke-opacity=".3"><path d="M170 150H330M170 165H330M170 180H330M170 195H330M170 210H330"/></g>
+<path d="M219 195V150L309 120V165M264 180V135" stroke-width="2"/>
+<path d="M219 150L309 120" stroke-width="5"/>
+<g fill="#fff" stroke="none"><ellipse cx="210" cy="195" rx="10" ry="8"/><ellipse cx="255" cy="180" rx="10" ry="8"/><ellipse cx="300" cy="165" rx="10" ry="8"/></g>
+<circle cx="505" cy="205" r="50" fill="#262626" stroke-opacity=".6"/>
+<path d="M488 188L510 200M522 200L544 188M483 235Q505 213 527 235" stroke-opacity=".6"/>
+<circle cx="430" cy="200" r="58" fill="#0a0a0a" stroke-width="2"/>
+<path d="M398 190Q410 178 422 190M438 190Q450 178 462 190M402 217Q430 247 458 217" stroke-width="2"/>
+<path d="M170 290C240 250 300 330 380 290S520 250 640 290" stroke-opacity=".5"/>
+<g fill="#171717"><circle cx="240" cy="270" r="4.5"/><circle cx="320" cy="300" r="4.5"/><circle cx="470" cy="283" r="4.5"/></g>
+<circle cx="640" cy="290" r="7" fill="#fff" stroke="none"/>
+<circle cx="640" cy="290" r="14" stroke-opacity=".35"/>
+<g stroke-opacity=".35"><path d="M606 110A24 24 0 0 1 606 158M606 90A44 44 0 0 1 606 178"/></g>
+<circle cx="606" cy="134" r="5" fill="#fff" stroke="none"/>
+</g>
+</svg>
