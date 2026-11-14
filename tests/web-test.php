@@ -144,7 +144,7 @@ try {
         throw new RuntimeException('Could not create the isolated public execution probe.');
     }
     $testPdo = new PDO(
-        'mysql:host=' . DB_HOST . ';dbname=' . $input['database'] . ';charset=utf8mb4',
+        'mysql:host=' . DB_HOST . ';port=' . (int)DB_PORT . ';dbname=' . $input['database'] . ';charset=utf8mb4',
         DB_USER,
         DB_PASS,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]

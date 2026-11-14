@@ -474,7 +474,7 @@ try {
 
     $stage = 'read-only database connection';
     $server = new PDO(
-        'mysql:host=' . DB_HOST . ';charset=utf8mb4',
+        'mysql:host=' . DB_HOST . ';port=' . (int)DB_PORT . ';charset=utf8mb4',
         DB_USER,
         DB_PASS,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]
