@@ -15,11 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      FESTORA_DB_HOST: \${{ secrets.FESTORA_DB_HOST }}
-      FESTORA_DB_PORT: \${{ secrets.FESTORA_DB_PORT }}
-      FESTORA_DB_NAME: \${{ secrets.FESTORA_DB_NAME }}
-      FESTORA_DB_USER: \${{ secrets.FESTORA_DB_USER }}
-      FESTORA_DB_PASS: \${{ secrets.FESTORA_DB_PASS }}
+      FESTORA_DB_HOST: ${{ secrets.FESTORA_DB_HOST }}
+      FESTORA_DB_PORT: ${{ secrets.FESTORA_DB_PORT }}
+      FESTORA_DB_NAME: ${{ secrets.FESTORA_DB_NAME }}
+      FESTORA_DB_USER: ${{ secrets.FESTORA_DB_USER }}
+      FESTORA_DB_PASS: ${{ secrets.FESTORA_DB_PASS }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           for key in FESTORA_DB_HOST FESTORA_DB_PORT FESTORA_DB_NAME FESTORA_DB_USER FESTORA_DB_PASS; do
-            if [[ -z "\${!key:-}" ]]; then
+            if [[ -z "${!key:-}" ]]; then
               echo "Missing required GitHub Actions secret: $key"
               exit 1
             fi
