@@ -1,0 +1,109 @@
+name: TiDB production database setup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: festora-tidb-production-migrations
+  cancel-in-progress: false
+
+jobs:
+  verify-and-migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FESTORA_DB_HOST: \${{ secrets.FESTORA_DB_HOST }}
+      FESTORA_DB_PORT: \${{ secrets.FESTORA_DB_PORT }}
+      FESTORA_DB_NAME: \${{ secrets.FESTORA_DB_NAME }}
+      FESTORA_DB_USER: \${{ secrets.FESTORA_DB_USER }}
+      FESTORA_DB_PASS: \${{ secrets.FESTORA_DB_PASS }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, mbstring
+          coverage: none
+
+      - name: Validate required secrets without displaying values
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in FESTORA_DB_HOST FESTORA_DB_PORT FESTORA_DB_NAME FESTORA_DB_USER FESTORA_DB_PASS; do
+            if [[ -z "\${!key:-}" ]]; then
+              echo "Missing required GitHub Actions secret: $key"
+              exit 1
+            fi
+          done
+          echo "Required database secrets are present."
+
+      - name: Verify TLS database connection
+        shell: bash
+        run: |
+          php -r '
+          try {
+              require "config.php";
+              $pdo = new PDO(
+                  festora_db_dsn(DB_NAME),
+                  DB_USER,
+                  DB_PASS,
+                  festora_db_pdo_options(false)
+              );
+              $one = $pdo->query("SELECT 1")->fetchColumn();
+              $selected = $pdo->query("SELECT DATABASE()")->fetchColumn();
+              if ((int)$one !== 1 || !is_string($selected) || !hash_equals((string)DB_NAME, $selected)) {
+                  throw new RuntimeException("Database identity check failed.");
+              }
+              echo "CONNECTION_OK; target database verified.\n";
+          } catch (Throwable $error) {
+              $state = $error instanceof PDOException ? (string)$error->getCode() : "CONFIG_OR_RUNTIME";
+              $driver = ($error instanceof PDOException && isset($error->errorInfo[1]))
+                  ? (string)$error->errorInfo[1] : "n/a";
+              fwrite(STDERR, "CONNECTION_FAILED; SQLSTATE=$state; driver_code=$driver\n");
+              exit(1);
+          }'
+
+      - name: Apply ordered schema migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -r '
+          $output = [];
+          exec(escapeshellarg(PHP_BINARY) . " scripts/migrate.php --database=" . escapeshellarg((string)getenv("FESTORA_DB_NAME")) . " 2>&1", $output, $code);
+          if ($code !== 0) {
+              foreach ($output as $line) {
+                  if (preg_match("/Migration command failed \(([^,]+), code ([^)]+)\)/", $line, $match)) {
+                      fwrite(STDERR, "MIGRATION_FAILED; type=" . $match[1] . "; code=" . $match[2] . "\n");
+                      exit(1);
+                  }
+              }
+              fwrite(STDERR, "MIGRATION_FAILED; details withheld. Do not retry until the database is inspected.\n");
+              exit(1);
+          }
+          echo implode(PHP_EOL, $output), PHP_EOL;
+          '
+
+      - name: Verify all application tables and columns
+        shell: bash
+        run: |
+          php -r '
+          try {
+              require "scripts/db-common.php";
+              $pdo = festora_cli_connect((string)DB_NAME);
+              festora_assert_application_schema($pdo);
+              $history = $pdo->query("SELECT COUNT(*) FROM festora_schema_migrations WHERE status = '\''applied'\''")->fetchColumn();
+              if ((int)$history !== 5) {
+                  throw new RuntimeException("Unexpected migration count.");
+              }
+              echo "SCHEMA_VERIFIED; five application tables, expected columns, indexes and foreign keys are present; five migrations applied.\n";
+          } catch (Throwable $error) {
+              $state = $error instanceof PDOException ? (string)$error->getCode() : "SCHEMA_OR_RUNTIME";
+              fwrite(STDERR, "SCHEMA_VERIFICATION_FAILED; code=$state\n");
+              exit(1);
+          }'
