@@ -26,7 +26,7 @@
             <nav aria-label="Account">
                 <p class="footer-title">Account</p>
                 <ul class="footer-links">
-                    <?php if ($footUser && $footUser['role'] === 'organizer'): ?>
+                    <?php if ($footUser && is_admin_role($footUser['role'])): ?>
                         <li><a href="<?= url('admin/index.php') ?>">Dashboard</a></li>
                         <li><a href="<?= url('admin/announcements.php') ?>">Announcements</a></li>
                         <li>

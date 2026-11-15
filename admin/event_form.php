@@ -1,17 +1,14 @@
 <?php
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/event-operations.php';
-$user = require_organizer();
+$user = require_admin();
 
 $id = (int)($_GET['id'] ?? $_POST['id'] ?? 0);
 $ev = ['title' => '', 'description' => '', 'category' => 'Technical', 'venue' => '', 'event_date' => '',
        'start_time' => '', 'end_time' => '', 'capacity' => 50, 'image_url' => ''];
 if ($id) {
-    $s = db()->prepare("SELECT * FROM events WHERE id=?");
-    $s->execute([$id]);
-    $row = $s->fetch();
-    if (!$row) { http_response_code(404); exit('Event not found.'); }
-    $ev = array_merge($ev, $row);
+    // 404 when missing, 403 unless this administrator is assigned to the event (Super Admins manage all).
+    $ev = array_merge($ev, require_event_manager($user, $id));
 }
 
 $errors = [];
@@ -39,30 +36,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($ev['capacity'] < 1 || $ev['capacity'] > 100000) $errors[] = 'Capacity must be between 1 and 100000.';
     if ($ev['image_url'] !== '' && !valid_image_url($ev['image_url'])) $errors[] = 'Image URL must be a valid http:// or https:// link with no spaces, quotes, parentheses or backslashes (encode them, e.g. %20).';
     if (!$errors) {
-        $end = $ev['end_time'] !== '' ? $ev['end_time'] : null;
-        $img = $ev['image_url'] !== '' ? $ev['image_url'] : null;
+        $fields = [
+            'title' => $ev['title'],
+            'description' => $ev['description'],
+            'category' => $ev['category'],
+            'venue' => $ev['venue'],
+            'event_date' => $ev['event_date'],
+            'start_time' => $ev['start_time'],
+            'end_time' => $ev['end_time'] !== '' ? $ev['end_time'] : null,
+            'capacity' => $ev['capacity'],
+            'image_url' => $ev['image_url'] !== '' ? $ev['image_url'] : null,
+        ];
         try {
             if ($id) {
-                $updated = update_event_with_capacity(db(), $id, [
-                    'title' => $ev['title'],
-                    'description' => $ev['description'],
-                    'category' => $ev['category'],
-                    'venue' => $ev['venue'],
-                    'event_date' => $ev['event_date'],
-                    'start_time' => $ev['start_time'],
-                    'end_time' => $end,
-                    'capacity' => $ev['capacity'],
-                    'image_url' => $img,
-                ]);
-                if (!$updated) {
+                // Permission is re-checked under the event row lock inside the update transaction.
+                $result = update_event_for_admin(db(), $user, $id, $fields);
+                if ($result === 'forbidden') {
+                    http_response_code(403);
+                    exit('Access denied: you are not assigned to this event.');
+                }
+                if ($result === 'not_found') {
+                    http_response_code(404);
+                    exit('Event not found.');
+                }
+                if ($result === 'capacity') {
                     $errors[] = 'Capacity cannot be lower than the number of active registrations.';
                 } else {
                     flash('Event updated.');
                     redirect('admin/index.php');
                 }
             } else {
-                db()->prepare("INSERT INTO events (title,description,category,venue,event_date,start_time,end_time,capacity,image_url,organizer_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
-                    ->execute([$ev['title'], $ev['description'], $ev['category'], $ev['venue'], $ev['event_date'], $ev['start_time'], $end, $ev['capacity'], $img, $user['id']]);
+                // The creator becomes the owner; an Event Admin is also assigned so they can manage it.
+                create_event_for_admin(db(), $user, $fields);
                 flash('Event created.');
                 redirect('admin/index.php');
             }
@@ -78,7 +83,7 @@ $t = fn($v) => $v ? substr((string)$v, 0, 5) : '';
 ?>
 <div class="page-head">
     <div>
-        <p class="eyebrow">Organiser console</p>
+        <p class="eyebrow"><?= is_super_admin_role($user['role']) ? 'Super Admin console' : 'Organiser console' ?></p>
         <h1><?= $id ? 'Edit event' : 'Create event' ?></h1>
     </div>
     <a class="btn btn-outline" href="<?= url('admin/index.php') ?>">Back</a>

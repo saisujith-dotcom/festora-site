@@ -13,6 +13,7 @@ const FESTORA_APPLICATION_TABLES = [
     'registrations',
     'schedule_items',
     'announcements',
+    'event_admin_assignments',
 ];
 
 function festora_cli_database_name(array $argv): string {
@@ -251,10 +252,13 @@ function festora_assert_application_schema(PDO $pdo): void {
             'name' => ['varchar(100)', false],
             'email' => ['varchar(150)', false],
             'password_hash' => ['varchar(255)', false],
-            'role' => ["enum('student','organizer')", false],
+            'role' => ["enum('student','organizer','event_admin','super_admin')", false],
             'enrollment_no' => ['varchar(30)', true],
             'branch' => ['varchar(60)', true],
             'created_at' => ['timestamp', true],
+            'is_active' => ['tinyint(1)', false],
+            'created_by' => ['int unsigned', true],
+            'disabled_at' => ['timestamp', true],
         ],
         'events' => [
             'id' => ['int unsigned', false],
@@ -291,12 +295,18 @@ function festora_assert_application_schema(PDO $pdo): void {
             'message' => ['text', false],
             'created_at' => ['timestamp', true],
         ],
+        'event_admin_assignments' => [
+            'event_id' => ['int unsigned', false],
+            'admin_id' => ['int unsigned', false],
+            'assigned_by' => ['int unsigned', true],
+            'assigned_at' => ['timestamp', true],
+        ],
     ];
 
     $tableStatement = $pdo->query(
         "SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES
          WHERE TABLE_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
            AND TABLE_TYPE='BASE TABLE'"
     );
     $actualTables = [];
@@ -317,7 +327,7 @@ function festora_assert_application_schema(PDO $pdo): void {
         "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
          FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
          ORDER BY TABLE_NAME, ORDINAL_POSITION"
     );
     $actualColumns = [];
@@ -341,7 +351,7 @@ function festora_assert_application_schema(PDO $pdo): void {
         "SELECT TABLE_NAME, INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS COLUMNS_LIST
          FROM information_schema.STATISTICS
          WHERE TABLE_SCHEMA=DATABASE() AND NON_UNIQUE=0
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
          GROUP BY TABLE_NAME, INDEX_NAME
          ORDER BY TABLE_NAME, INDEX_NAME"
     );
@@ -355,6 +365,7 @@ function festora_assert_application_schema(PDO $pdo): void {
         'registrations' => ['event_id,user_id', 'id'],
         'schedule_items' => ['id'],
         'announcements' => ['id'],
+        'event_admin_assignments' => ['event_id,admin_id'],
     ];
     foreach ($expectedUnique as &$columns) {
         sort($columns);
@@ -374,7 +385,7 @@ function festora_assert_application_schema(PDO $pdo): void {
         "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
          FROM information_schema.KEY_COLUMN_USAGE
          WHERE CONSTRAINT_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
            AND REFERENCED_TABLE_NAME IS NOT NULL
          ORDER BY TABLE_NAME, COLUMN_NAME"
     );
@@ -387,24 +398,48 @@ function festora_assert_application_schema(PDO $pdo): void {
     }
     $expectedForeignKeys = [
         ['announcements', 'event_id', 'events', 'id'],
+        ['event_admin_assignments', 'admin_id', 'users', 'id'],
+        ['event_admin_assignments', 'assigned_by', 'users', 'id'],
+        ['event_admin_assignments', 'event_id', 'events', 'id'],
         ['events', 'organizer_id', 'users', 'id'],
         ['registrations', 'event_id', 'events', 'id'],
         ['registrations', 'user_id', 'users', 'id'],
         ['schedule_items', 'event_id', 'events', 'id'],
+        ['users', 'created_by', 'users', 'id'],
     ];
+    sort($actualForeignKeys);
+    sort($expectedForeignKeys);
     if ($actualForeignKeys !== $expectedForeignKeys) {
         throw new RuntimeException('The migrated application foreign keys do not match this release.');
     }
 
+    // Exact delete rule per constraint. fk_event_owner MUST be RESTRICT so that deleting an
+    // administrator can never cascade into events and their registrations.
+    // (fk_event_org was the original CASCADE constraint; migration 010 replaced it with fk_event_owner.)
+    $expectedRules = [
+        'announcements.fk_ann_event' => 'CASCADE',
+        'event_admin_assignments.fk_assign_admin' => 'CASCADE',
+        'event_admin_assignments.fk_assign_by' => 'SET NULL',
+        'event_admin_assignments.fk_assign_event' => 'CASCADE',
+        'events.fk_event_owner' => 'RESTRICT',
+        'registrations.fk_reg_event' => 'CASCADE',
+        'registrations.fk_reg_user' => 'CASCADE',
+        'schedule_items.fk_sched_event' => 'CASCADE',
+        'users.fk_users_created_by' => 'SET NULL',
+    ];
     $ruleStatement = $pdo->query(
-        "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
          WHERE CONSTRAINT_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('events','registrations','schedule_items','announcements')"
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')"
     );
-    foreach ($ruleStatement->fetchAll(PDO::FETCH_COLUMN) as $deleteRule) {
-        if (strtoupper((string)$deleteRule) !== 'CASCADE') {
-            throw new RuntimeException('An application foreign key does not cascade deletes as expected.');
-        }
+    $actualRules = [];
+    foreach ($ruleStatement->fetchAll() as $rule) {
+        $actualRules[$rule['TABLE_NAME'] . '.' . $rule['CONSTRAINT_NAME']] = strtoupper((string)$rule['DELETE_RULE']);
+    }
+    ksort($actualRules);
+    ksort($expectedRules);
+    if ($actualRules !== $expectedRules) {
+        throw new RuntimeException('An application foreign key delete rule does not match this release.');
     }
 }
 

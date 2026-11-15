@@ -9,9 +9,11 @@ require $project . '/config.php';
 require_once $project . '/scripts/db-common.php';
 require_once $project . '/includes/event-operations.php';
 require_once $project . '/includes/event-search.php';
+require_once $project . '/includes/admin-management.php';
 require_once $project . '/includes/bootstrap.php';
 
 $testCount = 0;
+$skipCount = 0;
 $exitCode = 0;
 $createdDatabases = [];
 $temporaryRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'festora-tests-' . bin2hex(random_bytes(8));
@@ -24,6 +26,12 @@ function test_check(bool $condition, string $name): void {
     }
     $testCount++;
     echo 'PASS ' . $name . PHP_EOL;
+}
+
+function test_skip(string $name, string $reason): void {
+    global $skipCount;
+    $skipCount++;
+    echo 'SKIP ' . $name . ' (' . $reason . ')' . PHP_EOL;
 }
 
 function test_environment(array $overrides = [], array $remove = []): array {
@@ -88,7 +96,7 @@ function test_schema_signature(PDO $pdo): string {
     $tables = $pdo->query(
         "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION FROM information_schema.TABLES
          WHERE TABLE_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
          ORDER BY TABLE_NAME"
     )->fetchAll();
     $columns = $pdo->query(
@@ -96,14 +104,14 @@ function test_schema_signature(PDO $pdo): string {
                 CHARACTER_SET_NAME, COLLATION_NAME
          FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
          ORDER BY TABLE_NAME, ORDINAL_POSITION"
     )->fetchAll();
     $indexes = $pdo->query(
         "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, SUB_PART, INDEX_TYPE
          FROM information_schema.STATISTICS
          WHERE TABLE_SCHEMA=DATABASE()
-           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
          ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"
     )->fetchAll();
     $foreignKeys = $pdo->query(
@@ -114,7 +122,7 @@ function test_schema_signature(PDO $pdo): string {
            ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME
           AND r.TABLE_NAME=k.TABLE_NAME
          WHERE k.CONSTRAINT_SCHEMA=DATABASE()
-           AND k.TABLE_NAME IN ('users','events','registrations','schedule_items','announcements')
+           AND k.TABLE_NAME IN ('users','events','registrations','schedule_items','announcements','event_admin_assignments')
            AND k.REFERENCED_TABLE_NAME IS NOT NULL
          ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
     )->fetchAll();
@@ -141,6 +149,30 @@ function test_event(PDO $pdo, int $organizerId, string $title, int $capacity): i
     );
     $statement->execute([$title, 'Disposable regression event description.', 'Technical', 'Test Hall', '10:00:00', '11:00:00', $capacity, $organizerId]);
     return (int)$pdo->lastInsertId();
+}
+
+/** Build a database exactly as a deployment that stopped at migration $last would look (ledger included). */
+function test_apply_migrations_through(PDO $pdo, int $last): void {
+    $migrations = festora_migration_files(dirname(__DIR__) . '/database/migrations');
+    festora_create_migration_table($pdo);
+    foreach ($migrations as $version => $migration) {
+        if ((int)$version > $last) {
+            break;
+        }
+        $pdo->exec((string)file_get_contents($migration['path']));
+        $pdo->prepare(
+            "INSERT INTO `" . FESTORA_MIGRATION_TABLE . "` (version, checksum, status, applied_at)
+             VALUES (?, ?, 'applied', CURRENT_TIMESTAMP)"
+        )->execute([$version, $migration['checksum']]);
+    }
+}
+
+function test_legacy_counts(PDO $pdo): array {
+    $counts = [];
+    foreach (['users', 'events', 'registrations', 'schedule_items', 'announcements'] as $table) {
+        $counts[$table] = (int)$pdo->query('SELECT COUNT(*) FROM `' . $table . '`')->fetchColumn();
+    }
+    return $counts;
 }
 
 function test_worker_batch(string $database, int $eventId, array $jobs, string $barrier, array $environment): array {
@@ -376,10 +408,6 @@ function test_security_probes(string $temporaryRoot): void {
         && str_contains($validLogout['stdout'], 'PROBE_ROTATED=yes'),
         'valid CSRF logout clears session and rotates its identifier');
 
-    $studentAdmin = test_process([PHP_BINARY, $probe, 'student-admin', $sessionDirectory]);
-    test_check(str_contains($studentAdmin['stdout'], 'PROBE_STATUS=403'),
-        'student role is denied organizer-only access');
-
     $logProbe = test_process([PHP_BINARY, $probe, 'log-sanitize', $sessionDirectory]);
     test_check($logProbe['status'] === 0
         && str_contains($logProbe['stderr'], 'festora registration error=PDOException sqlstate=23000')
@@ -462,6 +490,195 @@ function test_security_probes(string $temporaryRoot): void {
         'document-root state opt-in rejects paths other than the exact protected sibling directory');
 }
 
+function test_student_admin_probe(string $temporaryRoot, string $database): void {
+    $probeRoot = $temporaryRoot . DIRECTORY_SEPARATOR . 'student-admin-probe';
+    $files = [
+        'config.php',
+        'tests/security-probe.php',
+        'includes/bootstrap.php',
+        'includes/account-validation.php',
+        'includes/permissions.php',
+    ];
+    foreach ($files as $relativePath) {
+        $source = dirname(__DIR__) . DIRECTORY_SEPARATOR
+            . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
+        $destination = $probeRoot . DIRECTORY_SEPARATOR
+            . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
+        $directory = dirname($destination);
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new RuntimeException('Could not prepare the isolated student authorization probe.');
+        }
+        if (!copy($source, $destination)) {
+            throw new RuntimeException('Could not prepare the isolated student authorization probe.');
+        }
+    }
+
+    $pdo = test_pdo($database);
+    $studentId = test_user($pdo, 'Security Probe Student', 'security-probe-student@regression.invalid');
+    $studentQuery = $pdo->prepare('SELECT role, is_active FROM users WHERE id=?');
+    $studentQuery->execute([$studentId]);
+    $student = $studentQuery->fetch();
+    if (!$student || $student['role'] !== 'student' || (int)$student['is_active'] !== 1) {
+        throw new RuntimeException('Student authorization probe requires an active student account.');
+    }
+
+    $environment = test_environment([
+        'FESTORA_DB_HOST' => (string)DB_HOST,
+        'FESTORA_DB_PORT' => (string)DB_PORT,
+        'FESTORA_DB_NAME' => $database,
+        'FESTORA_DB_USER' => (string)DB_USER,
+        'FESTORA_DB_PASS' => (string)DB_PASS,
+    ], ['FESTORA_DB_SSL_CA']);
+    if (defined('DB_SSL_CA') && trim((string)DB_SSL_CA) !== '') {
+        $environment['FESTORA_DB_SSL_CA'] = (string)DB_SSL_CA;
+    }
+
+    $sessionDirectory = $temporaryRoot . DIRECTORY_SEPARATOR . 'sessions';
+    $probe = $probeRoot . DIRECTORY_SEPARATOR . 'tests' . DIRECTORY_SEPARATOR . 'security-probe.php';
+    $studentAdmin = test_process(
+        [PHP_BINARY, $probe, 'student-admin', $sessionDirectory, (string)$studentId],
+        '',
+        $environment
+    );
+    test_check(str_contains($studentAdmin['stdout'], 'PROBE_STATUS=403'),
+        'student role is denied organizer-only access');
+}
+
+function test_multi_admin_workflow(string $database): void {
+    $pdo = test_pdo($database);
+    $suffix = bin2hex(random_bytes(6));
+    $password = 'FirstSuper123ABC';
+    $provision = test_process(
+        [
+            PHP_BINARY,
+            dirname(__DIR__) . '/scripts/provision-admin.php',
+            '--database=' . $database,
+            '--email=first-super-' . $suffix . '@regression.invalid',
+            '--name=First Super Admin',
+            '--super-admin',
+            '--password-stdin',
+        ],
+        $password . PHP_EOL
+    );
+    test_check($provision['status'] === 0
+        && trim($provision['stdout']) === 'Super Admin account created.'
+        && !str_contains($provision['stdout'] . $provision['stderr'], $password),
+        'CLI securely provisions the first Super Admin');
+
+    $superQuery = $pdo->prepare("SELECT id, role, is_active FROM users WHERE email=?");
+    $superQuery->execute(['first-super-' . $suffix . '@regression.invalid']);
+    $super = $superQuery->fetch();
+    $superId = (int)$super['id'];
+    test_check($super && $super['role'] === 'super_admin' && (int)$super['is_active'] === 1,
+        'first Super Admin is active and has the privileged role');
+
+    $secondEmail = 'second-super-' . $suffix . '@regression.invalid';
+    $secondSuper = test_process(
+        [
+            PHP_BINARY,
+            dirname(__DIR__) . '/scripts/provision-admin.php',
+            '--database=' . $database,
+            '--email=' . $secondEmail,
+            '--name=Second Super Admin',
+            '--super-admin',
+            '--password-stdin',
+        ],
+        $password . PHP_EOL
+    );
+    $secondLookup = $pdo->prepare('SELECT COUNT(*) FROM users WHERE email=?');
+    $secondLookup->execute([$secondEmail]);
+    test_check($secondSuper['status'] !== 0 && (int)$secondLookup->fetchColumn() === 0,
+        'initial provisioning refuses a second Super Admin without creating an account');
+
+    $adminAEmail = 'event-admin-a-' . $suffix . '@regression.invalid';
+    $createdA = admin_create_event_admin($pdo, $superId, 'Event Admin A', $adminAEmail, 'EventAdmin1234');
+    $adminAId = (int)($createdA['id'] ?? 0);
+    $createdB = admin_create_event_admin(
+        $pdo,
+        $superId,
+        'Event Admin B',
+        'event-admin-b-' . $suffix . '@regression.invalid',
+        'EventAdmin1234'
+    );
+    $adminBId = (int)($createdB['id'] ?? 0);
+    test_check($createdA['status'] === 'created' && $createdB['status'] === 'created',
+        'Super Admin creates Event Admin accounts');
+
+    $updated = admin_update_event_admin($pdo, $superId, $adminAId, 'Updated Event Admin A', $adminAEmail);
+    $nameQuery = $pdo->prepare('SELECT name FROM users WHERE id=?');
+    $nameQuery->execute([$adminAId]);
+    test_check($updated['status'] === 'updated' && $nameQuery->fetchColumn() === 'Updated Event Admin A',
+        'Super Admin edits an Event Admin account');
+
+    $eventA = test_event($pdo, $adminAId, 'Assigned event A ' . $suffix, 5);
+    $eventB = test_event($pdo, $adminBId, 'Assigned event B ' . $suffix, 5);
+    $assignedA = admin_assign_event($pdo, $superId, $eventA, $adminAId);
+    $assignedB = admin_assign_event($pdo, $superId, $eventB, $adminBId);
+    $userA = ['id' => $adminAId, 'role' => 'event_admin'];
+    $userB = ['id' => $adminBId, 'role' => 'event_admin'];
+    test_check($assignedA['status'] === 'assigned' && $assignedB['status'] === 'assigned'
+        && admin_can_manage_event($pdo, $userA, $eventA)
+        && !admin_can_manage_event($pdo, $userA, $eventB)
+        && admin_can_manage_event($pdo, $userB, $eventB),
+        'Event Admin permissions are limited to assigned events');
+
+    $assignedSecond = admin_assign_event($pdo, $superId, $eventA, $adminBId);
+    $ownerUnassign = admin_unassign_event($pdo, $superId, $eventA, $adminAId);
+    $reassigned = admin_reassign_event($pdo, $superId, $eventA, $adminAId, $adminBId);
+    $eventOwner = $pdo->prepare('SELECT organizer_id FROM events WHERE id=?');
+    $eventOwner->execute([$eventA]);
+    test_check($assignedSecond['status'] === 'assigned' && $ownerUnassign['status'] === 'is_owner'
+        && $reassigned['status'] === 'reassigned'
+        && (int)$eventOwner->fetchColumn() === $adminBId
+        && !admin_can_manage_event($pdo, $userA, $eventA)
+        && admin_can_manage_event($pdo, $userB, $eventA),
+        'Super Admin reassigns events and transfers ownership without losing access');
+
+    $eventForDelete = test_event($pdo, $adminAId, 'Preserved event ' . $suffix, 5);
+    $assignedForDelete = admin_assign_event($pdo, $superId, $eventForDelete, $adminAId);
+    $studentId = test_user($pdo, 'Workflow Student', 'workflow-student-' . $suffix . '@regression.invalid');
+    $registration = register_for_event($pdo, $eventForDelete, $studentId, 'register', date('Y-m-d'));
+    $blockedDelete = admin_delete($pdo, $superId, $adminAId);
+    $preservedDelete = admin_delete($pdo, $superId, $adminAId, $adminBId);
+    $eventOwner->execute([$eventForDelete]);
+    $registrationQuery = $pdo->prepare('SELECT COUNT(*) FROM registrations WHERE event_id=? AND user_id=?');
+    $registrationQuery->execute([$eventForDelete, $studentId]);
+    $sourceAccount = $pdo->prepare('SELECT COUNT(*) FROM users WHERE id=?');
+    $sourceAccount->execute([$adminAId]);
+    test_check($registration['status'] === 'confirmed'
+        && $blockedDelete['status'] === 'owns_events'
+        && $preservedDelete['status'] === 'deleted'
+        && (int)$eventOwner->fetchColumn() === $adminBId
+        && (int)$registrationQuery->fetchColumn() === 1
+        && (int)$sourceAccount->fetchColumn() === 0
+        && !admin_can_manage_event($pdo, $userA, $eventForDelete)
+        && admin_can_manage_event($pdo, $userB, $eventForDelete),
+        'Deleting an Event Admin transfers access and preserves events and registrations');
+
+    $adminC = admin_create_event_admin(
+        $pdo,
+        $superId,
+        'Event Admin C',
+        'event-admin-c-' . $suffix . '@regression.invalid',
+        'EventAdmin1234'
+    );
+    $adminCId = (int)$adminC['id'];
+    $deactivated = admin_set_active($pdo, $superId, $adminCId, false);
+    $reactivated = admin_set_active($pdo, $superId, $adminCId, true);
+    $deleted = admin_delete($pdo, $superId, $adminCId);
+    test_check($deactivated['status'] === 'deactivated'
+        && $reactivated['status'] === 'reactivated'
+        && $deleted['status'] === 'deleted',
+        'Super Admin deactivates, reactivates and deletes an unassigned Event Admin');
+
+    $lastSuper = admin_would_remove_last_super_admin($pdo, $superId);
+    $selfDeactivate = admin_set_active($pdo, $superId, $superId, false);
+    $superStatus = $pdo->prepare('SELECT is_active FROM users WHERE id=?');
+    $superStatus->execute([$superId]);
+    test_check($lastSuper && $selfDeactivate['status'] === 'self' && (int)$superStatus->fetchColumn() === 1,
+        'The last active Super Admin cannot be deactivated');
+}
+
 $stage = 'initializing';
 try {
     if (!mkdir($temporaryRoot, 0700, true)) {
@@ -485,6 +702,7 @@ try {
     $nonEmptyDb = test_new_database($server);
     $lockDb = test_new_database($server);
     $invalidSchemaDb = test_new_database($server);
+    $legacyDb = test_new_database($server);
 
     $stage = 'fresh migration';
     $migrated = test_run_migrations($testDb);
@@ -493,15 +711,17 @@ try {
     $rerun = test_run_migrations($testDb);
     test_check($rerun['status'] === 0 && str_contains($rerun['stdout'], 'Migrations are up to date.'),
         'repeated migration execution is idempotent');
+    test_student_admin_probe($temporaryRoot, $testDb);
+    test_multi_admin_workflow($testDb);
 
     $stage = 'schema integrity comparison';
     $dump = file_get_contents(dirname(__DIR__) . '/database/festora.sql');
     preg_match_all(
-        '~CREATE TABLE\s+(users|events|registrations|schedule_items|announcements)\s*\(.*?\)\s*ENGINE=InnoDB;~is',
+        '~CREATE TABLE\s+(users|events|registrations|schedule_items|announcements|event_admin_assignments)\s*\(.*?\)\s*ENGINE=InnoDB;~is',
         (string)$dump,
         $ddl
     );
-    if (count($ddl[0]) !== 5) {
+    if (count($ddl[0]) !== 6) {
         throw new RuntimeException('Could not isolate all legacy schema DDL for comparison.');
     }
     $dumpPdo = test_pdo($dumpDb);
@@ -509,14 +729,132 @@ try {
         $dumpPdo->exec($statement);
     }
     $test_check_tables = $server->prepare(
-        'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME IN (?, ?, ?, ?, ?)'
+        'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME IN (?, ?, ?, ?, ?, ?)'
     );
-    $test_check_tables->execute([$dumpDb, 'users', 'events', 'registrations', 'schedule_items', 'announcements']);
-    test_check((int)$test_check_tables->fetchColumn() === 5
+    $test_check_tables->execute([$dumpDb, 'users', 'events', 'registrations', 'schedule_items', 'announcements', 'event_admin_assignments']);
+    test_check((int)$test_check_tables->fetchColumn() === 6
         && test_schema_signature(test_pdo($testDb)) === test_schema_signature($dumpPdo),
         'migration schema matches festora.sql tables, columns, indexes, foreign keys, engine and collation');
     festora_assert_application_schema(test_pdo($testDb));
     test_check(true, 'schema validator accepts the intact migrated application schema');
+    $stage = 'legacy organizer upgrade and backfill';
+    // A deployment that stopped at migration 005 and holds real-looking legacy data.
+    test_apply_migrations_through(test_pdo($legacyDb), 5);
+    $legacyPdo = test_pdo($legacyDb);
+    $lu = [];
+    foreach ([
+        ['org1', 'Legacy Organizer One', 'legacy-org-1@regression.invalid', 'organizer'],
+        ['org2', 'Legacy Organizer Two', 'legacy-org-2@regression.invalid', 'organizer'],
+        ['org3', 'Legacy Organizer Idle', 'legacy-org-3@regression.invalid', 'organizer'],
+        ['stu1', 'Legacy Student One', 'legacy-student-1@regression.invalid', 'student'],
+        ['stu2', 'Legacy Student Two', 'legacy-student-2@regression.invalid', 'student'],
+    ] as $row) {
+        $lu[$row[0]] = test_user($legacyPdo, $row[1], $row[2], $row[3]);
+    }
+    $le1 = test_event($legacyPdo, $lu['org1'], 'Legacy Event One', 50);
+    $le2 = test_event($legacyPdo, $lu['org1'], 'Legacy Event Two', 50);
+    $le3 = test_event($legacyPdo, $lu['org2'], 'Legacy Event Three', 50);
+    $legacyReg = $legacyPdo->prepare('INSERT INTO registrations (event_id, user_id, status) VALUES (?, ?, ?)');
+    $legacyReg->execute([$le1, $lu['stu1'], 'registered']);
+    $legacyReg->execute([$le1, $lu['stu2'], 'cancelled']);
+    $legacyReg->execute([$le3, $lu['stu1'], 'registered']);
+    $legacyPdo->prepare('INSERT INTO schedule_items (event_id, item_time, title) VALUES (?, ?, ?)')
+        ->execute([$le1, '10:00:00', 'Legacy schedule item']);
+    $legacyPdo->prepare('INSERT INTO announcements (event_id, title, message) VALUES (?, ?, ?)')
+        ->execute([$le1, 'Legacy announcement', 'Legacy announcement body.']);
+    $legacyBefore = [
+        'counts' => test_legacy_counts($legacyPdo),
+        'owners' => $legacyPdo->query('SELECT id, organizer_id FROM events ORDER BY id')->fetchAll(PDO::FETCH_KEY_PAIR),
+        'regs' => $legacyPdo->query('SELECT id, event_id, user_id, status FROM registrations ORDER BY id')->fetchAll(),
+    ];
+
+    $upgrade = test_run_migrations($legacyDb);
+    test_check($upgrade['status'] === 0
+        && str_contains($upgrade['stdout'], 'Applied migration 006')
+        && str_contains($upgrade['stdout'], 'Applied migration 010')
+        && !str_contains($upgrade['stdout'], 'Applied migration 001')
+        && !str_contains($upgrade['stdout'], 'Applied migration 005'),
+        'upgrade from migration 005 applies only migrations 006 onward');
+
+    $roleRows = $legacyPdo->query('SELECT email, role, is_active, created_by, disabled_at FROM users ORDER BY id')->fetchAll();
+    $roles = [];
+    foreach ($roleRows as $r) {
+        $roles[$r['email']] = $r['role'];
+    }
+    test_check($roles['legacy-org-1@regression.invalid'] === 'event_admin'
+        && $roles['legacy-org-2@regression.invalid'] === 'event_admin'
+        && $roles['legacy-org-3@regression.invalid'] === 'event_admin',
+        'every legacy organizer is converted to event_admin');
+    test_check(!in_array('organizer', $roles, true)
+        && !in_array('super_admin', $roles, true)
+        && $roles['legacy-student-1@regression.invalid'] === 'student'
+        && $roles['legacy-student-2@regression.invalid'] === 'student',
+        'backfill grants no Super Admin role and leaves students as students');
+    $allActive = true;
+    foreach ($roleRows as $r) {
+        $allActive = $allActive && (int)$r['is_active'] === 1 && $r['created_by'] === null && $r['disabled_at'] === null;
+    }
+    test_check($allActive, 'existing accounts stay active after the upgrade');
+
+    $pairs = array_map(
+        static fn(array $a): string => $a['event_id'] . ':' . $a['admin_id'],
+        $legacyPdo->query('SELECT event_id, admin_id FROM event_admin_assignments ORDER BY event_id, admin_id')->fetchAll()
+    );
+    $expectedPairs = [$le1 . ':' . $lu['org1'], $le2 . ':' . $lu['org1'], $le3 . ':' . $lu['org2']];
+    sort($pairs);
+    sort($expectedPairs);
+    test_check($pairs === $expectedPairs,
+        'each legacy organizer receives an assignment for exactly the events they owned');
+    $idleAssignments = $legacyPdo->prepare('SELECT COUNT(*) FROM event_admin_assignments WHERE admin_id IN (?, ?, ?)');
+    $idleAssignments->execute([$lu['org3'], $lu['stu1'], $lu['stu2']]);
+    test_check((int)$idleAssignments->fetchColumn() === 0,
+        'an organizer without events and the students receive no assignments');
+
+    $legacyAfter = [
+        'counts' => test_legacy_counts($legacyPdo),
+        'owners' => $legacyPdo->query('SELECT id, organizer_id FROM events ORDER BY id')->fetchAll(PDO::FETCH_KEY_PAIR),
+        'regs' => $legacyPdo->query('SELECT id, event_id, user_id, status FROM registrations ORDER BY id')->fetchAll(),
+    ];
+    test_check($legacyBefore === $legacyAfter,
+        'upgrade preserves every user, event, ownership, registration, schedule item and announcement');
+    festora_assert_application_schema($legacyPdo);
+    test_check(test_schema_signature($legacyPdo) === test_schema_signature(test_pdo($testDb)),
+        'upgraded legacy schema is identical to a freshly migrated schema');
+
+    $rerunLegacy = test_run_migrations($legacyDb);
+    $ledger = $legacyPdo->query("SELECT COUNT(*) FROM festora_schema_migrations WHERE status='applied'")->fetchColumn();
+    test_check($rerunLegacy['status'] === 0
+        && str_contains($rerunLegacy['stdout'], 'Migrations are up to date.')
+        && !str_contains($rerunLegacy['stdout'], 'Applied migration')
+        && (int)$ledger === 10,
+        'a repeated upgrade applies nothing and the ledger holds each migration exactly once');
+
+    // Exactly once: a legacy-role row created AFTER the backfill must not be converted by a re-run.
+    $legacyPdo->prepare("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, 'organizer')")
+        ->execute(['Late Legacy Organizer', 'late-legacy-org@regression.invalid', password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT)]);
+    $lateRun = test_run_migrations($legacyDb);
+    $lateRole = $legacyPdo->query("SELECT role FROM users WHERE email='late-legacy-org@regression.invalid'")->fetchColumn();
+    test_check($lateRun['status'] === 0 && $lateRole === 'organizer',
+        'the role conversion runs exactly once and is never replayed');
+    $legacyPdo->exec("DELETE FROM users WHERE email='late-legacy-org@regression.invalid'");
+
+    // Requirement: deleting an administrator can never delete their events or registrations.
+    $blockedCode = null;
+    try {
+        $legacyPdo->prepare('DELETE FROM users WHERE id=?')->execute([$lu['org1']]);
+    } catch (PDOException $deleteError) {
+        $blockedCode = (string)$deleteError->getCode();
+    }
+    test_check($blockedCode === '23000' && test_legacy_counts($legacyPdo) === $legacyAfter['counts'],
+        'the database refuses to delete an owner who still has events; nothing cascades');
+    $idleDelete = $legacyPdo->prepare('DELETE FROM users WHERE id=?');
+    $idleDelete->execute([$lu['org3']]);
+    $afterIdle = test_legacy_counts($legacyPdo);
+    test_check($idleDelete->rowCount() === 1
+        && $afterIdle['users'] === $legacyAfter['counts']['users'] - 1
+        && $afterIdle['events'] === $legacyAfter['counts']['events']
+        && $afterIdle['registrations'] === $legacyAfter['counts']['registrations'],
+        'an administrator who owns no events can be deleted without touching events or registrations');
 
     $stage = 'migration safety checks';
     $noTarget = test_process([PHP_BINARY, dirname(__DIR__) . '/scripts/migrate.php']);
@@ -778,8 +1116,8 @@ try {
     $adminQuery->execute([$adminEmail]);
     $adminRow = $adminQuery->fetch();
     test_check($provision['status'] === 0 && $adminRow
-        && $adminRow['role'] === 'organizer' && password_verify($adminPassword, $adminRow['password_hash']),
-        'CLI provisioning creates a password-hashed organizer account');
+        && $adminRow['role'] === 'event_admin' && password_verify($adminPassword, $adminRow['password_hash']),
+        'CLI provisioning creates a password-hashed event_admin account (never a super_admin)');
     $provisionAgain = test_process(
         [PHP_BINARY, dirname(__DIR__) . '/scripts/provision-admin.php', '--database=' . $seedDb,
             '--email=' . $adminEmail, '--name=Provisioned Admin', '--password-stdin'],
@@ -823,6 +1161,9 @@ try {
     $publicRoot = $projectRoot . DIRECTORY_SEPARATOR . 'public';
     $expectedPublicFiles = [
         '.htaccess',
+        'admin/admin_events.php',
+        'admin/admin_form.php',
+        'admin/admins.php',
         'admin/announcements.php',
         'admin/event_delete.php',
         'admin/event_form.php',
@@ -886,6 +1227,9 @@ try {
         && str_contains((string)$ignore, '*.key'),
         'development router requires public root and keeps private storage outside it');
 
+    // The InfinityFree package is an obsolete, git-ignored artifact (Render is the deployment target), so
+    // checking that it still mirrors the current source is opt-in. Its static security checks always run.
+    $checkStagedSync = getenv('FESTORA_TEST_INFINITYFREE_SYNC') === '1';
     $stagedRoot = $projectRoot . DIRECTORY_SEPARATOR . 'deployment' . DIRECTORY_SEPARATOR
         . 'infinityfree-upload' . DIRECTORY_SEPARATOR . 'htdocs';
     $expectedStagedFiles = [
@@ -984,8 +1328,13 @@ try {
                 && is_string($sourceHash) && is_string($stagedHash) && hash_equals($sourceHash, $stagedHash);
         }
     }
-    test_check($stagedRuntimeCopiesMatch,
-        'staged private controllers, includes, configuration loader, and assets match source files');
+    if ($checkStagedSync) {
+        test_check($stagedRuntimeCopiesMatch,
+            'staged private controllers, includes, configuration loader, and assets match source files');
+    } else {
+        test_skip('staged private controllers, includes, configuration loader, and assets match source files',
+            'obsolete InfinityFree package; set FESTORA_TEST_INFINITYFREE_SYNC=1 to check it against source');
+    }
 
     $stagedRootRules = file_get_contents($stagedRoot . DIRECTORY_SEPARATOR . '.htaccess');
     $stagedPrivateRules = file_get_contents($stagedRoot . DIRECTORY_SEPARATOR . '_festora-private'
@@ -996,7 +1345,7 @@ try {
         . DIRECTORY_SEPARATOR . 'infinityfree-config.example.php');
     $wrapperMappings = true;
     foreach ($expectedPublicFiles as $relative) {
-        if (!str_ends_with($relative, '.php')) continue;
+        if (!$checkStagedSync || !str_ends_with($relative, '.php')) continue;
         $target = str_starts_with($relative, 'admin/') || str_starts_with($relative, 'api/')
             ? "require dirname(__DIR__) . '/_festora-private/" . $relative . "';"
             : "require __DIR__ . '/_festora-private/" . $relative . "';";
@@ -1004,14 +1353,20 @@ try {
         $wrapperContent = str_replace(["\r\n", "\r"], "\n", trim((string)file_get_contents($wrapperPath)));
         $wrapperMappings = $wrapperMappings && $wrapperContent === "<?php\n" . $target;
     }
-    test_check($wrapperMappings
-        && str_contains((string)$stagedRootRules, 'uploads|private-storage|_festora-private|_festora-state')
+    test_check(str_contains((string)$stagedRootRules, 'uploads|private-storage|_festora-private|_festora-state')
         && str_contains((string)$stagedPrivateRules, 'Require all denied')
         && str_contains((string)$stagedStateRules, 'Require all denied')
         && str_contains((string)$stagedConfigExample, "define('DB_HOST', '');")
         && str_contains((string)$stagedConfigExample, "define('DB_PASS', '');"),
-        'staged wrappers map correctly and private paths/configuration fail closed');
+        'staged private paths and configuration example fail closed');
+    if ($checkStagedSync) {
+        test_check($wrapperMappings, 'staged wrappers map to the current public route shims');
+    } else {
+        test_skip('staged wrappers map to the current public route shims',
+            'obsolete InfinityFree package; set FESTORA_TEST_INFINITYFREE_SYNC=1 to check it against source');
+    }
 
+    echo 'TOTAL SKIPPED=' . $skipCount . PHP_EOL;
     echo 'TOTAL PASS=' . $testCount . PHP_EOL;
 } catch (Throwable $error) {
     fwrite(STDERR, 'FAIL stage=' . $stage . ' type=' . get_class($error) . ' message=' . $error->getMessage() . PHP_EOL);

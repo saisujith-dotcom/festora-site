@@ -13,11 +13,13 @@ Mini project for the Web Development course. Students browse and register for co
 | Event page | Description, venue, date and time, schedule, event announcements, seat progress |
 | Registration | One-click register / cancel, duplicate prevention, capacity enforced inside a DB transaction |
 | My Registrations | Student's own registrations with cancel option |
+| Admin dashboards | Super Admins manage Event Admin accounts and assignments; Event Admins manage assigned events only |
+| Event Admin accounts | Create, edit, deactivate, reactivate and safely delete Event Admin accounts |
 | Organizer dashboard | Stats, create / edit / delete events (full CRUD) |
 | Participants | Per-event list, remove participant, CSV export |
 | Schedule | Add and remove timetable items per event |
 | Announcements | General or event-specific announcements |
-| Auth | Signup (students), login, logout (POST + CSRF), sessions, role-based access control |
+| Auth | Public signup creates students only; login, logout (POST + CSRF), database-validated sessions and role-based access control |
 
 ## Local setup
 
@@ -29,7 +31,7 @@ Mini project for the Web Development course. Students browse and register for co
    CREATE DATABASE festora CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
    ```
    Do not select an existing database containing tables or data.
-3. Configure `FESTORA_DB_HOST`, `FESTORA_DB_NAME`, `FESTORA_DB_USER`, and `FESTORA_DB_PASS` in your private local environment, or define the corresponding `DB_*` constants in a private `config.local.php`. That file is excluded by `.gitignore`; never put real credentials in `config.php`, Docker build arguments, or source control. Use a restricted database account, not a root account. There is no root/empty-password fallback; incomplete configuration fails closed.
+3. Configure `FESTORA_DB_HOST`, `FESTORA_DB_NAME`, `FESTORA_DB_USER`, and `FESTORA_DB_PASS` in your private local environment, or define the corresponding `DB_*` constants in a private `config.local.php`. That file is excluded by `.gitignore`; never put real credentials in `config.php`, Docker build arguments, or source control. Use a restricted database account, not a root account. There is no root/empty-password fallback; incomplete configuration fails closed. An unset port defaults to `4000` (TiDB), so a local MySQL server on another port (usually `3306`) needs `FESTORA_DB_PORT` / `DB_PORT`. TLS with certificate verification is mandatory (there is no plaintext fallback), so when PHP has no default CA bundle, set `FESTORA_DB_SSL_CA` / `DB_SSL_CA` to a readable CA bundle that your local server's certificate chains to (see `docs/deployment.md`).
 4. Run schema migrations from a terminal in the project directory:
    ```
    php scripts/migrate.php --database=festora
@@ -51,15 +53,19 @@ The migration account needs permission to inspect its target schema and create t
 
 ### Administrator provisioning
 
-The interface calls privileged accounts organizers; the stored role remains `organizer` for compatibility with existing accounts. The “Admin” terminology describes the current organizer capabilities and is not a second role. Do not rename roles without a product/data migration decision.
+After migrations are complete, create the first Super Admin with the CLI-only utility. The command refuses to create another Super Admin if one already exists, refuses duplicate email addresses, and accepts the password only through standard input:
 
-After migrations are complete, provision an initial organizer using the CLI-only utility. Provide the password through standard input (not as a command-line argument or source code); the utility hashes it and refuses duplicate email addresses:
-
-```
+```text
 php scripts/provision-admin.php --database=festora --email=admin@example.edu --name="Festora Admin" --password-stdin
 ```
 
-Pipe a password from an approved local secret manager or other protected input method. Do not use a command such as `echo password` that records a password in shell history. The target database must have the verified migration ledger and expected schema. The command is denied over HTTP.
+Add `--super-admin` to this command for the initial Super Admin account:
+
+```text
+php scripts/provision-admin.php --database=festora --email=admin@example.edu --name="Festora Admin" --super-admin --password-stdin
+```
+
+Pipe the password from an approved local secret manager or another protected input method; do not put it in command arguments, source code, or shell history. The password must be 12–72 bytes with at least one letter and one digit. The target database must have the verified migration ledger and expected schema. The command is denied over HTTP. After the first Super Admin logs in, additional Event Admin accounts can be created from **Dashboard → Manage Event Admins**.
 
 ### Database safety
 
@@ -128,12 +134,13 @@ festora/
 
 ```
 users (1) ──< events            organizer_id
+users (1) ──< event_admin_assignments >── (1) events
 users (1) ──< registrations >── (1) events      UNIQUE(event_id, user_id)
 events (1) ──< schedule_items
 events (1) ──< announcements    event_id nullable = general announcement
 ```
 
-Tables: `users`, `events`, `registrations`, `schedule_items`, `announcements`. Foreign keys use `ON DELETE CASCADE`.
+Tables: `users`, `events`, `registrations`, `schedule_items`, `announcements`, and `event_admin_assignments`. Deleting an administrator never deletes their owned events: ownership and assignments must be transferred first. An administrator with registrations cannot be deleted. Deleting an event itself still removes its dependent records.
 
 ## Security measures
 
@@ -141,7 +148,7 @@ Tables: `users`, `events`, `registrations`, `schedule_items`, `announcements`. F
 - `password_hash` / `password_verify`; session ID regenerated on login
 - Output escaped with `htmlspecialchars`
 - CSRF token on every POST form
-- Role checks on all `admin/` pages; open-redirect protection on login `next`
+- Role checks on all `admin/` pages, per-event assignment checks, and database validation of account status on authenticated requests; open-redirect protection on login `next`
 - Server-side validation mirrors client-side validation
 - Row lock (`SELECT ... FOR UPDATE`) prevents overbooking the last seat
 - Database credentials are kept out of Git: `config.local.php` is git-ignored; `config.php` holds no secrets
@@ -154,7 +161,7 @@ Tables: `users`, `events`, `registrations`, `schedule_items`, `announcements`. F
 4. Register until "AI in Everyday Life" (capacity 4) is full, then confirm further registration is refused.
 5. Cancel a registration, then confirm the seat count goes back up.
 6. As a student, open `/admin/index.php`, then confirm access is denied (403).
-7. As organizer, create, edit and delete an event; add schedule items; post an announcement; export CSV.
+7. As Event Admin, manage an assigned event's details, schedule, announcements and participants. As Super Admin, create an Event Admin, assign and reassign events, then deactivate/reactivate or safely delete that account.
 8. Search "code", filter by "Workshop", then confirm results update without a page reload.
 9. With JavaScript disabled, confirm event listing and GET search still render usable results. The automated suite covers server-rendered fallback, but does not replace manual keyboard/screen-reader/responsive review.
 10. Run `php tests/run.php` for automated disposable-database, concurrency, CLI, session, CSRF, HTTP route, and core-flow checks. Never use the configured application database as a destructive test target.

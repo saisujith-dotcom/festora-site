@@ -60,10 +60,9 @@ if (isset($_SESSION['last_active']) && time() - (int)$_SESSION['last_active'] > 
 $_SESSION['last_active'] = time();
 unset($__wasLoggedIn);
 
-/** True for demo-account addresses (the reserved @festora.test domain). */
-function is_demo_email(string $email): bool {
-    return str_ends_with(strtolower(trim($email)), '@festora.test');
-}
+// is_demo_email(), the role helpers and the account validators are shared with the CLI utilities, so they
+// live in account-validation.php. It must load before the demo-session check below.
+require_once __DIR__ . '/account-validation.php';
 
 // Demo accounts only work when FESTORA_ENV=development. Drop any demo session otherwise.
 if (!festora_is_development() && is_demo_email((string)($_SESSION['user']['email'] ?? ''))) {
@@ -138,19 +137,75 @@ function flash(?string $msg = null, string $type = 'success') {
     return $f;
 }
 
-function current_user(): ?array { return $_SESSION['user'] ?? null; }
-function is_organizer(): bool { return (current_user()['role'] ?? '') === 'organizer'; }
+/** Per-request cache for current_user(), keyed by session id + account id. */
+function current_user(): ?array {
+    static $cache = null;
+    $session = $_SESSION['user'] ?? null;
+    if (!is_array($session) || !isset($session['id']) || !is_numeric($session['id'])) {
+        $cache = null;
+        return null;
+    }
+
+    $key = session_id() . ':' . (int)$session['id'];
+    if ($cache !== null && $cache['key'] === $key) {
+        return $cache['user'];
+    }
+
+    // The session only remembers WHO is logged in. Whether that account still exists, is active and what
+    // role it holds is read from the database on every authenticated request, so a deactivation, deletion
+    // or role change takes effect on the very next request.
+    $statement = db()->prepare('SELECT id, name, email, role, is_active FROM users WHERE id=? LIMIT 1');
+    $statement->execute([(int)$session['id']]);
+    $row = $statement->fetch();
+
+    $valid = is_array($row)
+        && (int)$row['is_active'] === 1
+        && in_array($row['role'], FESTORA_ACCOUNT_ROLES, true);
+    if (!$valid) {
+        $deactivated = is_array($row) && (int)$row['is_active'] !== 1;
+        unset($_SESSION['user']);
+        $_SESSION['csrf'] = bin2hex(random_bytes(32));
+        if (!headers_sent()) {
+            session_regenerate_id(true);
+        }
+        flash(
+            $deactivated
+                ? 'This account has been deactivated. Please contact a Super Admin.'
+                : 'Your session is no longer valid. Please log in again.',
+            'error'
+        );
+        $cache = null;
+        return null;
+    }
+
+    $user = ['id' => (int)$row['id'], 'name' => $row['name'], 'email' => $row['email'], 'role' => $row['role']];
+    $_SESSION['user'] = $user;
+    $cache = ['key' => $key, 'user' => $user];
+    return $user;
+}
+function is_admin(): bool { return is_admin_role(current_user()['role'] ?? null); }
+function is_super_admin(): bool { return is_super_admin_role(current_user()['role'] ?? null); }
 
 function require_login(): array {
     $u = current_user();
-    if (!$u) { flash('Please log in to continue.', 'error'); redirect('login.php'); }
+    if (!$u) {
+        if (!isset($_SESSION['flash'])) flash('Please log in to continue.', 'error');
+        redirect('login.php');
+    }
     return $u;
 }
-function require_organizer(): array {
+function require_admin(): array {
     $u = require_login();
-    if ($u['role'] !== 'organizer') { http_response_code(403); exit('Access denied: organizers only.'); }
+    if (!is_admin_role($u['role'] ?? null)) { http_response_code(403); exit('Access denied: administrators only.'); }
     return $u;
 }
+function require_super_admin(): array {
+    $u = require_admin();
+    if (!is_super_admin_role($u['role'])) { http_response_code(403); exit('Access denied: Super Admins only.'); }
+    return $u;
+}
+
+require_once __DIR__ . '/permissions.php';
 
 function valid_time(string $time): bool {
     return preg_match('/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/', $time) === 1;

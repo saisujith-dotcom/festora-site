@@ -5,6 +5,13 @@ if (PHP_SAPI !== 'cli' || !isset($argv[1])) {
 
 $mode = $argv[1];
 $sessionDirectory = $argv[2] ?? sys_get_temp_dir();
+$studentId = null;
+if ($mode === 'student-admin') {
+    $studentId = filter_var($argv[3] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($studentId === false) {
+        exit(5);
+    }
+}
 if (!is_dir($sessionDirectory) && !mkdir($sessionDirectory, 0700, true) && !is_dir($sessionDirectory)) {
     exit(3);
 }
@@ -78,7 +85,12 @@ $sessionId = bin2hex(random_bytes(16));
 session_id($sessionId);
 session_start();
 $_SESSION = [
-    'user' => ['id' => 91, 'name' => 'Regression Student', 'email' => 'student@example.invalid', 'role' => 'student'],
+    'user' => [
+        'id' => $mode === 'student-admin' ? $studentId : 1,
+        'name' => 'Regression Student',
+        'email' => 'student@example.invalid',
+        'role' => 'student',
+    ],
     'csrf' => str_repeat('a', 64),
 ];
 session_write_close();
@@ -97,7 +109,7 @@ register_shutdown_function(static function () use ($sessionId): void {
 
 if ($mode === 'student-admin') {
     require __DIR__ . '/../includes/bootstrap.php';
-    require_organizer();
+    require_admin();
 }
 
 require __DIR__ . '/../logout.php';
