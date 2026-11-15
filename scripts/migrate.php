@@ -51,7 +51,11 @@ try {
             if (!is_string($sql) || trim($sql) === '') {
                 throw new RuntimeException('Migration SQL is empty or unreadable.');
             }
-            $pdo->exec($sql);
+            $statements = array_filter(array_map('trim', explode(';', $sql)));
+
+            foreach ($statements as $statementSql) {
+                $pdo->exec($statementSql);
+            }
             $statement = $pdo->prepare(
                 'UPDATE `' . FESTORA_MIGRATION_TABLE . '`
                  SET status = \'applied\', applied_at = CURRENT_TIMESTAMP, failure_reason = NULL
