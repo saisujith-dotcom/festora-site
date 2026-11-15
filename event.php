@@ -87,7 +87,7 @@ require __DIR__ . '/includes/header.php';
 
                 <?php if (!$user): ?>
                     <a class="btn btn-block" href="<?= url('login.php?next=' . urlencode('event.php?id=' . $id)) ?>">Log in to register</a>
-                <?php elseif ($user['role'] === 'organizer'): ?>
+                <?php elseif (is_admin_role($user['role'])): ?>
                     <a class="btn btn-block" href="<?= url('admin/participants.php?event_id=' . $id) ?>">View participants</a>
                     <a class="btn btn-outline btn-block" href="<?= url('admin/event_form.php?id=' . $id) ?>">Edit event</a>
                 <?php elseif ($past): ?>

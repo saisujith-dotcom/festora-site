@@ -41,13 +41,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $error === '') {
     // Always run one hash check so response time does not reveal whether the email exists.
     $hash = ($u && !$demoBlocked) ? $u['password_hash'] : '$2y$12$nbcDnKBmgbi.IlPBK8l9NOQBqLOZJZwHR9wwWqs2Tcc3GB3XqhNiW';
     $passOk = password_verify($pass, $hash);
-    if ($u && $passOk && !$demoBlocked) {
+    if ($u && $passOk && !$demoBlocked && (int)$u['is_active'] === 1) {
         rl_login_success($rl['token']);
         session_regenerate_id(true);
         $_SESSION['csrf'] = bin2hex(random_bytes(32));
         $_SESSION['user'] = ['id' => (int)$u['id'], 'name' => $u['name'], 'email' => $u['email'], 'role' => $u['role']];
         if ($next) redirect($next);
-        redirect($u['role'] === 'organizer' ? 'admin/index.php' : 'index.php');
+        redirect(is_admin_role($u['role']) ? 'admin/index.php' : 'index.php');
     }
     $error = 'Invalid email or password.';
 }

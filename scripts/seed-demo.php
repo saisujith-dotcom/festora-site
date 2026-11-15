@@ -39,7 +39,7 @@ try {
         'Festora Organizer',
         'organizer@festora.test',
         '$2y$10$4T1e1fe37FqBmiPPYZcZne38oeRjZwig.b4KGGya1bFsovlv8.hNe',
-        'organizer',
+        'event_admin',
         null,
         null,
     ]);
@@ -73,6 +73,13 @@ try {
             $event[5], $event[6], $event[7], $organizerId,
         ]);
         $eventIds[$event[0]] = (int)$pdo->lastInsertId();
+    }
+
+    $assignmentInsert = $pdo->prepare(
+        'INSERT INTO event_admin_assignments (event_id, admin_id, assigned_by) VALUES (?, ?, NULL)'
+    );
+    foreach ($eventIds as $eventId) {
+        $assignmentInsert->execute([$eventId, $organizerId]);
     }
 
     $scheduleItems = [

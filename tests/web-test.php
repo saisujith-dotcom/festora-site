@@ -144,7 +144,7 @@ try {
         throw new RuntimeException('Could not create the isolated public execution probe.');
     }
     $testPdo = new PDO(
-        'mysql:host=' . DB_HOST . ';dbname=' . $input['database'] . ';charset=utf8mb4',
+        'mysql:host=' . DB_HOST . ';port=' . (int)DB_PORT . ';dbname=' . $input['database'] . ';charset=utf8mb4',
         DB_USER,
         DB_PASS,
         [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
@@ -475,7 +475,7 @@ try {
     [$adminLogin] = web_login($base, $adminCookie, $input['admin_email'], $input['admin_password']);
     web_check($adminLogin['status'] === 302, 'provisioned organizer can log in');
     $dashboard = web_request($base, '/admin/index.php', $adminCookie);
-    web_check($dashboard['status'] === 200 && str_contains($dashboard['body'], 'Organizer Dashboard'),
+    web_check($dashboard['status'] === 200 && str_contains($dashboard['body'], 'Event Admin Dashboard'),
         'organizer dashboard is accessible');
 
     $createPage = web_request($base, '/admin/event_form.php', $adminCookie);
@@ -605,6 +605,201 @@ try {
     web_check($delete['status'] === 302 && (int)$eventLookup->fetchColumn() === 0
         && (int)$scheduleCount->fetchColumn() === 0,
         'organizer can delete an event and dependent records cascade');
+
+    // Super Admin account management, event assignment/reassignment, ownership and revocation over HTTP.
+    (static function () use ($base, $cookieDirectory, $input, $testPdo, &$stage): void {
+        $stage = 'Super Admin routes, event ownership and revocation';
+        $admSuperEmail = 'adm-super@regression.invalid';
+        $admSuperPassword = bin2hex(random_bytes(12)) . 'Cc3!';
+        $testPdo->prepare("INSERT INTO users (name, email, password_hash, role, is_active) VALUES (?, ?, ?, 'super_admin', 1)")
+            ->execute(['AM Super Admin', $admSuperEmail, password_hash($admSuperPassword, PASSWORD_DEFAULT)]);
+        $one = function (string $sql, array $params = []) use ($testPdo) {
+            $s = $testPdo->prepare($sql);
+            $s->execute($params);
+            return $s->fetchColumn();
+        };
+        $admLogin = function (string $name, string $email, string $password) use ($base, $cookieDirectory): string {
+            $cookie = $cookieDirectory . DIRECTORY_SEPARATOR . $name . '.txt';
+            file_put_contents($cookie, '');
+            [$login] = web_login($base, $cookie, $email, $password);
+            if ($login['status'] !== 302) {
+                throw new RuntimeException('Admin management test login failed for ' . $name);
+            }
+            return $cookie;
+        };
+        $admPost = function (string $cookie, string $tokenPath, string $path, array $fields) use ($base): array {
+            $token = web_csrf(web_request($base, $tokenPath, $cookie)['body']);
+            return web_request($base, $path, $cookie, ['csrf' => $token] + $fields);
+        };
+        $admEvent = function (string $title, int $id = 0): array {
+            return ['id' => (string)$id, 'title' => $title, 'description' => 'Admin management ownership fixture event.',
+                'category' => 'Technical', 'venue' => 'AM Hall', 'event_date' => date('Y-m-d', strtotime('+6 days')),
+                'start_time' => '10:00', 'end_time' => '11:00', 'capacity' => '5', 'image_url' => ''];
+        };
+        $admAssigned = function (int $eventId, int $adminId) use ($one): int {
+            return (int)$one('SELECT COUNT(*) FROM event_admin_assignments WHERE event_id=? AND admin_id=?', [$eventId, $adminId]);
+        };
+        $admEventId = function (string $title) use ($one): int {
+            return (int)$one('SELECT id FROM events WHERE title=?', [$title]);
+        };
+        $adminA = (int)$one('SELECT id FROM users WHERE email=?', [$input['admin_email']]);
+        $studentId = (int)$one('SELECT id FROM users WHERE email=?', [$input['second_student_email']]);
+        $superId = (int)$one('SELECT id FROM users WHERE email=?', [$admSuperEmail]);
+        web_check($adminA > 0 && $studentId > 0 && $superId > 0, 'admin management: fixtures: event admin, student and super admin exist');
+        $routes = ['/admin/admins.php', '/admin/admin_form.php', '/admin/admin_events.php?id=' . $adminA];
+
+        // --- anonymous
+        $anon = $cookieDirectory . DIRECTORY_SEPARATOR . 'adm-anon.txt';
+        file_put_contents($anon, '');
+        foreach ($routes as $route) {
+            $res = web_request($base, $route, $anon);
+            web_check($res['status'] === 302 && stripos($res['headers'], 'login.php') !== false,
+                'admin management: anonymous visitor is redirected to login from ' . $route);
+        }
+
+        // --- student
+        $studentCookie = $admLogin('adm-student', $input['second_student_email'], $input['second_student_password']);
+        foreach ($routes as $route) {
+            $res = web_request($base, $route, $studentCookie);
+            web_check($res['status'] === 403, 'admin management: student gets 403 on ' . $route);
+        }
+        $usersBefore = (int)$one('SELECT COUNT(*) FROM users');
+        $res = web_request($base, '/admin/admin_form.php', $studentCookie, ['csrf' => 'x', 'id' => '0', 'name' => 'Student Made',
+            'email' => 'student-made@regression.invalid', 'password' => 'Xx9!longenough1', 'password2' => 'Xx9!longenough1']);
+        web_check($res['status'] === 403 && (int)$one('SELECT COUNT(*) FROM users') === $usersBefore,
+            'admin management: student POST to create-admin route is refused and creates nothing');
+        $res = web_request($base, '/admin/admins.php', $studentCookie, ['csrf' => 'x', 'action' => 'delete', 'id' => $adminA]);
+        web_check($res['status'] === 403 && (int)$one('SELECT COUNT(*) FROM users WHERE id=?', [$adminA]) === 1,
+            'admin management: student POST to admins.php cannot delete an Event Admin');
+        $res = web_request($base, '/admin/admin_events.php?id=' . $adminA, $studentCookie,
+            ['csrf' => 'x', 'action' => 'assign', 'event_id' => '1', 'id' => $adminA]);
+        web_check($res['status'] === 403, 'admin management: student POST to admin_events.php is refused');
+        web_check((string)$one('SELECT role FROM users WHERE id=?', [$studentId]) === 'student',
+            'admin management: student role is unchanged after the forbidden requests');
+
+        // --- Event Admin A: no access to Super Admin routes; creates event 1
+        $aCookie = $admLogin('adm-admin-a', $input['admin_email'], $input['admin_password']);
+        foreach ($routes as $route) {
+            $res = web_request($base, $route, $aCookie);
+            web_check($res['status'] === 403, 'admin management: Event Admin gets 403 on ' . $route);
+        }
+        $usersBefore = (int)$one('SELECT COUNT(*) FROM users');
+        $res = $admPost($aCookie, '/admin/event_form.php', '/admin/admin_form.php', ['id' => '0', 'name' => 'Escalated',
+            'email' => 'escalated@regression.invalid', 'password' => 'Xx9!longenough1', 'password2' => 'Xx9!longenough1', 'role' => 'super_admin']);
+        web_check($res['status'] === 403 && (int)$one('SELECT COUNT(*) FROM users') === $usersBefore,
+            'admin management: Event Admin cannot create accounts or escalate a role');
+        $res = $admPost($aCookie, '/admin/event_form.php', '/admin/admins.php', ['action' => 'delete', 'id' => $superId]);
+        web_check($res['status'] === 403 && (int)$one('SELECT COUNT(*) FROM users WHERE id=?', [$superId]) === 1,
+            'admin management: Event Admin cannot delete the Super Admin');
+        $res = $admPost($aCookie, '/admin/event_form.php', '/admin/event_form.php', $admEvent('AM Event One'));
+        $e1 = $admEventId('AM Event One');
+        web_check($res['status'] === 302 && $e1 > 0 && web_request($base, '/admin/event_form.php?id=' . $e1, $aCookie)['status'] === 200,
+            'admin management: Event Admin creates and can edit their own event 1');
+
+        // --- Super Admin: access and account CRUD
+        $sCookie = $admLogin('adm-super', $admSuperEmail, $admSuperPassword);
+        $res = web_request($base, '/admin/admins.php', $sCookie);
+        web_check($res['status'] === 200 && str_contains($res['body'], 'Provisioned Admin'), 'admin management: Super Admin opens admins.php and sees Event Admins');
+        web_check(web_request($base, '/admin/admin_form.php', $sCookie)['status'] === 200, 'admin management: Super Admin opens admin_form.php');
+        web_check(web_request($base, '/admin/admin_events.php?id=' . $adminA, $sCookie)['status'] === 200, 'admin management: Super Admin opens admin_events.php');
+        $admB = 'adm-admin-b@regression.invalid';
+        $admBPass = bin2hex(random_bytes(10)) . 'Dd4!';
+        $res = $admPost($sCookie, '/admin/admin_form.php', '/admin/admin_form.php', ['id' => '0', 'name' => 'AM Admin B', 'email' => $admB,
+            'password' => $admBPass, 'password2' => $admBPass . 'x']);
+        web_check($res['status'] === 200 && (int)$one('SELECT COUNT(*) FROM users WHERE email=?', [$admB]) === 0,
+            'admin management: create Event Admin rejects mismatched passwords');
+        $res = $admPost($sCookie, '/admin/admin_form.php', '/admin/admin_form.php', ['id' => '0', 'name' => 'AM Admin B', 'email' => $admB,
+            'password' => $admBPass, 'password2' => $admBPass, 'role' => 'super_admin']);
+        $bRow = $testPdo->prepare('SELECT id, role, is_active, password_hash FROM users WHERE email=?');
+        $bRow->execute([$admB]);
+        $b = $bRow->fetch();
+        web_check($res['status'] === 302 && $b && $b['role'] === 'event_admin' && (int)$b['is_active'] === 1
+            && password_verify($admBPass, $b['password_hash']), 'admin management: create Event Admin ignores a forged role and hashes the password');
+        $bId = (int)$b['id'];
+        $res = $admPost($sCookie, '/admin/admin_form.php', '/admin/admin_form.php', ['id' => '0', 'name' => 'Dup', 'email' => $admB,
+            'password' => $admBPass, 'password2' => $admBPass]);
+        web_check((int)$one('SELECT COUNT(*) FROM users WHERE email=?', [$admB]) === 1, 'admin management: duplicate Event Admin email is rejected');
+        $res = $admPost($sCookie, '/admin/admin_form.php?id=' . $bId, '/admin/admin_form.php?id=' . $bId, ['id' => $bId,
+            'name' => 'AM Admin B Renamed', 'email' => $admB, 'role' => 'super_admin']);
+        web_check($res['status'] === 302 && (string)$one('SELECT name FROM users WHERE id=?', [$bId]) === 'AM Admin B Renamed'
+            && (string)$one('SELECT role FROM users WHERE id=?', [$bId]) === 'event_admin', 'admin management: edit Event Admin updates the name and keeps the role');
+        web_check(web_request($base, '/admin/admin_form.php?id=' . $studentId, $sCookie)['status'] === 403
+            && web_request($base, '/admin/admin_form.php?id=' . $superId, $sCookie)['status'] === 403
+            && web_request($base, '/admin/admin_form.php?id=999999', $sCookie)['status'] === 404,
+            'admin management: admin_form refuses student and Super Admin targets and 404s unknown ids');
+        $res = $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'deactivate', 'id' => $bId]);
+        web_check($res['status'] === 302 && (int)$one('SELECT is_active FROM users WHERE id=?', [$bId]) === 0, 'admin management: Super Admin deactivates an Event Admin');
+        $bCookieFile = $cookieDirectory . DIRECTORY_SEPARATOR . 'adm-admin-b.txt';
+        file_put_contents($bCookieFile, '');
+        [$bLogin] = web_login($base, $bCookieFile, $admB, $admBPass);
+        web_check($bLogin['status'] === 200, 'admin management: deactivated Event Admin cannot log in');
+        $res = $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'reactivate', 'id' => $bId]);
+        web_check($res['status'] === 302 && (int)$one('SELECT is_active FROM users WHERE id=?', [$bId]) === 1, 'admin management: Super Admin reactivates an Event Admin');
+        foreach ([$studentId, $superId] as $badTarget) {
+            $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'deactivate', 'id' => $badTarget]);
+        }
+        web_check((int)$one('SELECT is_active FROM users WHERE id=?', [$studentId]) === 1
+            && (int)$one('SELECT is_active FROM users WHERE id=?', [$superId]) === 1,
+            'admin management: admins.php cannot deactivate a student or a Super Admin');
+        $res = $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'delete', 'id' => $bId]);
+        web_check($res['status'] === 302 && (int)$one('SELECT COUNT(*) FROM users WHERE id=?', [$bId]) === 0, 'admin management: Super Admin deletes an unassigned Event Admin');
+
+        // --- assignment, reassignment, revocation
+        $admC = 'adm-admin-c@regression.invalid';
+        $admCPass = bin2hex(random_bytes(10)) . 'Ee5!';
+        $admPost($sCookie, '/admin/admin_form.php', '/admin/admin_form.php', ['id' => '0', 'name' => 'AM Admin C', 'email' => $admC,
+            'password' => $admCPass, 'password2' => $admCPass]);
+        $cId = (int)$one('SELECT id FROM users WHERE email=?', [$admC]);
+        $admPost($sCookie, '/admin/event_form.php', '/admin/event_form.php', $admEvent('AM Event Two'));
+        $e2 = $admEventId('AM Event Two');
+        web_check($cId > 0 && $e2 > 0, 'admin management: second Event Admin and Super Admin-created event 2 exist');
+        $cCookie = $admLogin('adm-admin-c', $admC, $admCPass);
+        web_check(web_request($base, '/admin/event_form.php?id=' . $e2, $cCookie)['status'] === 403,
+            'admin management: unassigned Event Admin is denied event 2');
+        $assign = function (int $onAdmin, string $action, int $event, int $to = 0) use ($admPost, $sCookie): array {
+            return $admPost($sCookie, '/admin/admin_events.php?id=' . $onAdmin, '/admin/admin_events.php?id=' . $onAdmin,
+                ['id' => $onAdmin, 'action' => $action, 'event_id' => $event, 'to_id' => $to]);
+        };
+        $assign($cId, 'assign', $e2);
+        web_check($admAssigned($e2, $cId) === 1 && web_request($base, '/admin/event_form.php?id=' . $e2, $cCookie)['status'] === 200,
+            'admin management: assignment grants the Event Admin access to event 2');
+        $assign($cId, 'reassign', $e2, $adminA);
+        web_check($admAssigned($e2, $adminA) === 1 && $admAssigned($e2, $cId) === 0, 'admin management: reassignment moves event 2 from C to A');
+        $paths = ['/admin/event_form.php?id=' . $e2, '/admin/participants.php?event_id=' . $e2, '/admin/schedule.php?event_id=' . $e2];
+        $denied = true;
+        foreach ($paths as $p) { $denied = $denied && web_request($base, $p, $cCookie)['status'] === 403; }
+        web_check($denied, 'admin management: revoked (reassigned-away) Event Admin is denied edit, participants and schedule on a live session');
+        $res = $admPost($cCookie, '/admin/event_form.php', '/admin/event_form.php', $admEvent('AM Hijacked Title', $e2));
+        web_check($res['status'] === 403 && (string)$one('SELECT title FROM events WHERE id=?', [$e2]) === 'AM Event Two',
+            'admin management: revoked Event Admin cannot edit event 2');
+        $res = $admPost($cCookie, '/admin/event_form.php', '/admin/event_delete.php', ['id' => $e2]);
+        web_check($res['status'] === 403 && (int)$one('SELECT COUNT(*) FROM events WHERE id=?', [$e2]) === 1,
+            'admin management: revoked Event Admin cannot delete event 2');
+        web_check(web_request($base, '/admin/event_form.php?id=' . $e2, $aCookie)['status'] === 200, 'admin management: new owner A can open event 2');
+        $assign($cId, 'assign', $e2);
+        $assign($adminA, 'unassign', $e2);
+        web_check($admAssigned($e2, $adminA) === 0 && $admAssigned($e2, $cId) === 1, 'admin management: unassign removes A and keeps C on event 2');
+        $res = $admPost($aCookie, '/admin/event_form.php', '/admin/event_delete.php', ['id' => $e2]);
+        web_check(web_request($base, '/admin/event_form.php?id=' . $e2, $aCookie)['status'] === 403
+            && (int)$one('SELECT COUNT(*) FROM events WHERE id=?', [$e2]) === 1,
+            'admin management: unassigned A is denied event 2 on a live session and cannot delete it');
+        web_check(web_request($base, '/admin/event_form.php?id=' . $e1, $aCookie)['status'] === 200
+            && web_request($base, '/admin/event_form.php?id=' . $e1, $cCookie)['status'] === 403
+            && web_request($base, '/admin/event_form.php?id=' . $e2, $cCookie)['status'] === 200,
+            'admin management: each Event Admin reaches only their own events (A: event 1, C: event 2)');
+        web_check(web_request($base, '/admin/event_form.php?id=' . $e1, $sCookie)['status'] === 200
+            && web_request($base, '/admin/event_form.php?id=' . $e2, $sCookie)['status'] === 200,
+            'admin management: Super Admin can manage every event');
+        $res = $admPost($sCookie, '/admin/admin_events.php?id=' . $cId, '/admin/admin_events.php?id=' . $studentId,
+            ['id' => $studentId, 'action' => 'assign', 'event_id' => $e2, 'to_id' => 0]);
+        web_check($res['status'] === 403 && $admAssigned($e2, $studentId) === 0, 'admin management: assigning an event to a student account is refused');
+        $assign($cId, 'reassign', $e2, $studentId);
+        web_check($admAssigned($e2, $studentId) === 0 && $admAssigned($e2, $cId) === 1, 'admin management: reassigning an event to a student account is refused and changes nothing');
+        $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'deactivate', 'id' => $cId]);
+        web_check(in_array(web_request($base, '/admin/index.php', $cCookie)['status'], [302, 401, 403], true),
+            'admin management: deactivated Event Admin loses access on a live session');
+        $admPost($sCookie, '/admin/admins.php', '/admin/admins.php', ['action' => 'reactivate', 'id' => $cId]);
+    })();
 
     $uploadSource = file_get_contents($project . '/register.php')
         . file_get_contents($project . '/admin/event_form.php');

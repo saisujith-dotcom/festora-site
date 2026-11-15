@@ -1,12 +1,9 @@
 <?php
 require_once __DIR__ . '/../includes/bootstrap.php';
-require_organizer();
+$user = require_admin();
 
 $eventId = (int)($_GET['event_id'] ?? $_POST['event_id'] ?? 0);
-$s = db()->prepare("SELECT id, title FROM events WHERE id=?");
-$s->execute([$eventId]);
-$ev = $s->fetch();
-if (!$ev) { http_response_code(404); exit('Event not found.'); }
+$ev = require_event_manager($user, $eventId);   // 404 if missing, 403 if not assigned to this event
 
 $errors = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

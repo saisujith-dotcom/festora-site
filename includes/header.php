@@ -68,8 +68,12 @@ $navBrandMark = e(mb_strtoupper(mb_substr(APP_NAME, 0, 1)));
             <a href="<?= url('index.php') ?>"<?= $navCur(!$navAdmin && $navFile === 'index.php') ?>>Home</a>
             <a href="<?= url('events.php') ?>"<?= $navCur(!$navAdmin && in_array($navFile, ['events.php', 'event.php'], true)) ?>>Events</a>
             <?php if ($user): ?>
-                <?php if ($user['role'] === 'organizer'): ?>
-                    <a href="<?= url('admin/index.php') ?>"<?= $navCur($navAdmin && $navFile !== 'announcements.php') ?>>Dashboard</a>
+                <?php if (is_admin_role($user['role'])): ?>
+                    <?php $navAdminMgmt = $navAdmin && in_array($navFile, ['admins.php', 'admin_form.php', 'admin_events.php'], true); ?>
+                    <a href="<?= url('admin/index.php') ?>"<?= $navCur($navAdmin && !$navAdminMgmt && $navFile !== 'announcements.php') ?>>Dashboard</a>
+                    <?php if (is_super_admin_role($user['role'])): ?>
+                        <a href="<?= url('admin/admins.php') ?>"<?= $navCur($navAdminMgmt) ?>>Event Admins</a>
+                    <?php endif; ?>
                     <a href="<?= url('admin/announcements.php') ?>"<?= $navCur($navAdmin && $navFile === 'announcements.php') ?>>Announcements</a>
                 <?php else: ?>
                     <a href="<?= url('my-registrations.php') ?>"<?= $navCur($navFile === 'my-registrations.php') ?>>My Registrations</a>
